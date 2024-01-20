@@ -272,6 +272,14 @@ inline rocksdb::Slice toSlice(const folly::StringPiece& str) {
 using KVMap = std::unordered_map<std::string, std::string>;
 using KVArrayIterator = std::vector<KV>::const_iterator;
 
+/**
+ * code: ATOMIC_OP 的执行是否符合预期 
+ * batch: 将最后需要应用到状态机的行为 encode 成 raft log 的形式
+ * readSet: 该 ATOMIC_OP 读取的 key 集合
+ * writeSet: 该 ATOMIC_OP 写入的 key 集合
+ * 
+ * @note, see src/storage/mutate/AddVerticesProcessor.cpp
+ */
 class MergeableAtomicOpResult {
  public:
   nebula::cpp2::ErrorCode code;
@@ -280,6 +288,11 @@ class MergeableAtomicOpResult {
   std::list<std::string> writeSet;
 };
 
+/**
+ * @brief 利用 Raft 内部实际单线程顺序处理 log 的行为实现原子操作, 该操作会在实际发生
+ *  appendLog 之前 (AppendLogsIteratorFactory::make) 执行.
+ *  该 function 应在执行逻辑中填充上面的 MergeableAtomicOpResult 并返回.
+ */
 using MergeableAtomicOp = folly::Function<MergeableAtomicOpResult(void)>;
 
 }  // namespace kvstore

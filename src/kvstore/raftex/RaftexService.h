@@ -20,7 +20,8 @@ class IOThreadPoolObserver;
 
 /**
  * @brief Class to handle raft thrift server, also distribute request to RaftPart.
- * Only heartbeat is processed in io thread, other requests are processed in worker thread
+ *        Only heartbeat is processed in io thread,
+ *        other requests are processed in worker thread
  */
 class RaftexService : public cpp2::RaftexServiceSvIf {
  public:
@@ -74,7 +75,8 @@ class RaftexService : public cpp2::RaftexServiceSvIf {
    * @param resp
    * @param req
    */
-  void askForVote(cpp2::AskForVoteResponse& resp, const cpp2::AskForVoteRequest& req) override;
+  void askForVote(cpp2::AskForVoteResponse& resp,
+                  const cpp2::AskForVoteRequest& req) override;
 
   /**
    * @brief Get the raft part state of given partition
@@ -82,7 +84,8 @@ class RaftexService : public cpp2::RaftexServiceSvIf {
    * @param resp
    * @param req
    */
-  void getState(cpp2::GetStateResponse& resp, const cpp2::GetStateRequest& req) override;
+  void getState(cpp2::GetStateResponse& resp,
+                const cpp2::GetStateRequest& req) override;
 
   /**
    * @brief Handle append log request in worker thread
@@ -90,7 +93,8 @@ class RaftexService : public cpp2::RaftexServiceSvIf {
    * @param resp
    * @param req
    */
-  void appendLog(cpp2::AppendLogResponse& resp, const cpp2::AppendLogRequest& req) override;
+  void appendLog(cpp2::AppendLogResponse& resp,
+                 const cpp2::AppendLogRequest& req) override;
 
   /**
    * @brief Handle send snapshot reqtuest in worker thread

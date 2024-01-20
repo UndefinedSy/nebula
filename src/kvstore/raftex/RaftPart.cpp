@@ -53,7 +53,7 @@ using OpProcessor = folly::Function<std::optional<std::string>(AtomicOp op)>;
 
 /**
  * @brief code to describe if a log can be merged with others
- *  NO_MERGE: can't merge with any other
+ *  NO_MERGE:   can't merge with any other
  *  MERGE_NEXT: can't previous logs, can merge with next. (has to be head)
  *  MERGE_PREV: can merge with previous, can't merge any more.  (has to be tail)
  *  MERGE_BOTH: can merge with any other
@@ -159,6 +159,21 @@ class AppendLogsIterator final : public LogIterator {
 class AppendLogsIteratorFactory {
  public:
   AppendLogsIteratorFactory() = default;
+
+  /**
+   * @brief 遍历 cacheLogs 中的 item, 找到可以一起处理的 log 或 op, 转储到 sendLogs 中.
+   * 
+   * @note, ATOMIC_OP 的处理发生在 mergeAble 中, 其在 LogCache 中本身的表示为一个
+   *        empty log + MergeableAtomicOp. 但是在 wal 中, 以及后续 Raft 逻辑中处理的
+   *        都是 log string, 实际在执行对应 op 时会生成对应 raft log 存到其内部 batch 中.
+   * @note 这里不是简单交换两个 raft queue, 也不是真的把多条 logs 给压成一条, 而是从
+   *        cacheLogs 中筛选出可以合并成一个 appendLog 的 raft logs.
+   * @note caller should hold the lock to protect cacheLogs
+   * @note 这里 sendLogs 中仍然是 in-memory 的 LogCacheItem
+   * 
+   * @param cacheLogs 
+   * @param sendLogs 
+   */
   static void make(RaftPart::LogCache& cacheLogs, RaftPart::LogCache& sendLogs) {
     DCHECK(sendLogs.empty());
     std::unordered_set<std::string> memLock;
@@ -166,20 +181,26 @@ class AppendLogsIteratorFactory {
     for (auto& log : cacheLogs) {
       auto code = mergeAble(log, memLock, ranges);
       if (code == MergeAbleCode::MERGE_BOTH) {
+        // 将 cacheLogs 的头放到 sendLogs 的尾部, 继续检查下条 log 是否可以合并
         sendLogs.emplace_back();
         std::swap(cacheLogs.front(), sendLogs.back());
         cacheLogs.pop_front();
         continue;
       } else if (code == MergeAbleCode::MERGE_PREV) {
+        // 将 cacheLogs 的头放到 sendLogs 的尾部, 并退出
         sendLogs.emplace_back();
         std::swap(cacheLogs.front(), sendLogs.back());
         cacheLogs.pop_front();
         break;
       } else if (code == MergeAbleCode::NO_MERGE) {
         // if we meet some failed atomicOp, we can just skip it.
+        // 该 log 是一个 ATOMIC_OP, 且执行失败了, 失败后本身会 set promise 通知 waiter
+        // 因此这里直接跳过该 log
         cacheLogs.pop_front();
         continue;
       } else {  // MERGE_NEXT
+        // MERGE_NEXT, 说明该 log 不能和前面的 log 合并. 这里不会 pop 而是直接退出
+        // 下次尝试 merge raft log queue 时会从该 log 开始
         break;
       }
     }
@@ -187,8 +208,22 @@ class AppendLogsIteratorFactory {
 
   /**
    * @brief check if a incoming log can be merged with previous logs
-   *
+   *  For various log type, we have different behavior:
+   *   - NORMAL: PUT/DELETE will update row to the `memLock` set
+   *             DELETE_RANGE will update covered range to the `ranges` list
+   *             returns MERGE_BOTH anyway.
+   *   - COMMAND: returns MERGE_PREV
+   *   - ATOMIC_OP: call the function(AtomicOp) firstly
+   *    - operation failed: set promise and returns NO_MERGE
+   *    - operation success:
+   *      - if try to read a key which is mutated by previous log, returns MERGE_NEXT
+   *          (key to read has been marked by `memLock`)
+   *      - if try to read a key which is in a range, returns MERGE_NEXT
+   *          (key to read is located in `ranges`)
+   *      - check read first, then add key in write set to `memLock`, returns MERGE_BOTH
    * @param logWrapper
+   * @param memLock[IN/OUT], keys to mutate in this operation batch
+   * @param ranges[IN/OUT], ranges to mutate in this operation batch
    */
   static MergeAbleCode mergeAble(RaftPart::LogCacheItem& logWrapper,
                                  std::unordered_set<std::string>& memLock,
@@ -258,6 +293,13 @@ class AppendLogsIteratorFactory {
     return MergeAbleCode::NO_MERGE;
   }
 
+  /**
+   * @brief decode Raft log, update `updateSet` and `ranges` according to the log type
+   * 
+   * @param log 
+   * @param updateSet[OUT] PUT/DELETE, 会将操作的 key 追加到 updateSet 中
+   * @param ranges[OUT] DELETE_RANGE, 会将操作的 range 追加到 ranges 中
+   */
   static void decode(const std::string& log,
                      std::vector<folly::StringPiece>& updateSet,
                      std::list<std::pair<std::string, std::string>>& ranges) {
@@ -400,11 +442,12 @@ const char* RaftPart::roleStr(Role role) const {
 void RaftPart::start(std::vector<HostAddr>&& peers, bool asLearner) {
   std::lock_guard<std::mutex> g(raftLock_);
 
-  // There are some rare cases that the part start as learner, but wal is not empty. For example,
-  // the node is dead, and one partition is removed from raft group (majority still alive). However,
-  // the part is added back to raft group again as learner. So the wal may be not empty, what is
-  // worse, there could be case that commitLogId is 0, but wal's lastLogId is not 0, which is
-  // obviously not expected
+  // There are some rare cases that the part start as learner, but wal is not empty.
+  //  For example, the node is dead, and one partition is removed from raft group
+  //  (majority still alive). However, the part is added back to raft group again
+  //  as learner. So the wal may be not empty, what is worse, there could be case
+  //  that commitLogId is 0, but wal's lastLogId is not 0, which is obviously
+  //  not expected
   if (asLearner) {
     wal_->reset();
   }
@@ -421,16 +464,19 @@ void RaftPart::start(std::vector<HostAddr>&& peers, bool asLearner) {
   committedLogTerm_ = logIdAndTerm.second;
 
   if (lastLogId_ < committedLogId_) {
-    VLOG(1) << idStr_ << "Reset lastLogId " << lastLogId_ << " to be the committedLogId "
-            << committedLogId_;
+    VLOG(1) << idStr_ << "Reset lastLogId " << lastLogId_
+            << " to be the committedLogId " << committedLogId_;
     lastLogId_ = committedLogId_;
     lastLogTerm_ = committedLogTerm_;
     wal_->reset();
   }
-  VLOG(1) << idStr_ << "There are " << peers.size() << " peer hosts, and total " << peers.size() + 1
-          << " copies. The quorum is " << quorum_ + 1 << ", as learner " << asLearner
-          << ", lastLogId " << lastLogId_ << ", lastLogTerm " << lastLogTerm_ << ", committedLogId "
-          << committedLogId_ << ", committedLogTerm " << committedLogTerm_ << ", term " << term_;
+  VLOG(1) << idStr_ << "There are " << peers.size() << " peer hosts, "
+          << "and total " << peers.size() + 1 << " copies. "
+          << "The quorum is " << quorum_ + 1 << ", "
+          << "I will start as learner or not: " << asLearner
+          << ", lastLogId " << lastLogId_ << ", lastLogTerm " << lastLogTerm_
+          << ", committedLogId " << committedLogId_
+          << ", committedLogTerm " << committedLogTerm_ << ", term " << term_;
 
   // Start all peer hosts
   for (auto& addr : peers) {
@@ -526,8 +572,9 @@ void RaftPart::addLearner(const HostAddr& addr, bool needLock) {
       VLOG(1) << idStr_ << "I am learner!";
       return;
     }
-    auto it = std::find_if(
-        hosts_.begin(), hosts_.end(), [&addr](const auto& h) { return h->address() == addr; });
+    auto it = std::find_if(hosts_.begin(), hosts_.end(), [&addr](const auto& h) {
+      return h->address() == addr;
+    });
     if (it == hosts_.end()) {
       hosts_.emplace_back(std::make_shared<Host>(addr, shared_from_this(), true));
       VLOG(1) << idStr_ << "Add learner " << addr;
@@ -578,9 +625,12 @@ void RaftPart::commitTransLeader(const HostAddr& target, bool needLock) {
     VLOG(1) << idStr_ << "Commit transfer leader to " << target;
     switch (role_) {
       case Role::LEADER: {
+        // transfer target 不是自己
         if (target != addr_ && !hosts_.empty()) {
-          auto iter = std::find_if(
-              hosts_.begin(), hosts_.end(), [](const auto& h) { return !h->isLearner(); });
+          // 找到一个不是 learner 的 host, 确保自己退位后有其他人参加选举
+          auto iter = std::find_if(hosts_.begin(), hosts_.end(), [](const auto& h) {
+            return !h->isLearner();
+          });
           if (iter != hosts_.end()) {
             lastMsgRecvDur_.reset();
             role_ = Role::FOLLOWER;
@@ -652,8 +702,9 @@ void RaftPart::addPeer(const HostAddr& peer) {
     }
     return;
   }
-  auto it = std::find_if(
-      hosts_.begin(), hosts_.end(), [&peer](const auto& h) { return h->address() == peer; });
+  auto it = std::find_if(hosts_.begin(), hosts_.end(), [&peer](const auto& h) {
+    return h->address() == peer;
+  });
   if (it == hosts_.end()) {
     hosts_.emplace_back(std::make_shared<Host>(peer, shared_from_this()));
     updateQuorum();
@@ -676,8 +727,9 @@ void RaftPart::removePeer(const HostAddr& peer) {
     VLOG(1) << idStr_ << "Remove myself from the raft group.";
     return;
   }
-  auto it = std::find_if(
-      hosts_.begin(), hosts_.end(), [&peer](const auto& h) { return h->address() == peer; });
+  auto it = std::find_if(hosts_.begin(), hosts_.end(), [&peer](const auto& h) {
+    return h->address() == peer;
+  });
   if (it == hosts_.end()) {
     VLOG(1) << idStr_ << "The peer " << peer << " not exist!";
   } else {
@@ -768,6 +820,7 @@ void RaftPart::commitRemovePeer(const HostAddr& peer, bool needLock) {
   }
 }
 
+// NORMAL
 folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendAsync(ClusterID source, std::string log) {
   if (source < 0) {
     source = clusterId_;
@@ -775,18 +828,19 @@ folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendAsync(ClusterID source, s
   return appendLogAsync(source, LogType::NORMAL, std::move(log));
 }
 
+// ATOMIC
 folly::Future<nebula::cpp2::ErrorCode> RaftPart::atomicOpAsync(kvstore::MergeableAtomicOp op) {
   return appendLogAsync(clusterId_, LogType::ATOMIC_OP, "", std::move(op));
 }
 
+// COMMAND
 folly::Future<nebula::cpp2::ErrorCode> RaftPart::sendCommandAsync(std::string log) {
   return appendLogAsync(clusterId_, LogType::COMMAND, std::move(log));
 }
 
-folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendLogAsync(ClusterID source,
-                                                                LogType logType,
-                                                                std::string log,
-                                                                kvstore::MergeableAtomicOp op) {
+folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendLogAsync(
+    ClusterID source, LogType logType, std::string log,
+    kvstore::MergeableAtomicOp op) {
   if (blocking_) {
     // No need to block heartbeats and empty log.
     if ((logType == LogType::NORMAL && !log.empty()) || logType == LogType::ATOMIC_OP) {
@@ -803,6 +857,13 @@ folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendLogAsync(ClusterID source
         << "replicatingLogs_ :" << std::boolalpha << replicatingLogs_;
     return nebula::cpp2::ErrorCode::E_RAFT_BUFFER_OVERFLOW;
   }
+
+  // 尝试将 incoming log 追加到 Raft Log Buffer 中
+  // CAS 地检查是否有人正在 replicating logs.
+  //  如果有, 则直接返回
+  //  如果没有, 当前线程将会负责将当前 RaftPart 的 LogBuffer 的广播
+  // 返回给外部的 Future 对应的 Promise 会与 log 一起存储到 RaftPart 的 LogBuffer 中
+  //  会在对应的 log 被 commit 时被 setValue
   {
     std::lock_guard<std::mutex> lck(logsLock_);
 
@@ -852,6 +913,7 @@ folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendLogAsync(ClusterID source
     VLOG_EVERY_N(2, 1000) << idStr_ << "Cannot append logs, clean the buffer";
     return nebula::cpp2::ErrorCode::E_LEADER_CHANGED;
   }
+
   // Replicate buffered logs to all followers
   // Replication will happen on a separate thread and will block
   // until majority accept the logs, the leadership changes, or
@@ -871,6 +933,14 @@ folly::Future<nebula::cpp2::ErrorCode> RaftPart::appendLogAsync(ClusterID source
   return retFuture;
 }
 
+/**
+ * @brief Raft Append impl (leader), append the logs in iterator
+ *  firstly, write the log to Raft WAL
+ *  then, get a thread from ioThreadPool to replicate the logs to all followers
+ * since the replication happens on a separate thread, the function will return
+ *  soon.
+ * the blocking time is around the time to write the log to WAL
+ */
 void RaftPart::appendLogsInternal(AppendLogsIterator iter, TermID termId) {
   TermID currTerm = 0;
   LogID prevLogId = 0;
@@ -890,8 +960,9 @@ void RaftPart::appendLogsInternal(AppendLogsIterator iter, TermID termId) {
     committed = committedLogId_;
     // Step 1: Write WAL
     {
-      SCOPED_TIMER(
-          [](uint64_t execTime) { stats::StatsManager::addValue(kAppendWalLatencyUs, execTime); });
+      SCOPED_TIMER([](uint64_t execTime) {
+        stats::StatsManager::addValue(kAppendWalLatencyUs, execTime);
+      });
       if (!wal_->appendLogs(iter)) {
         VLOG_EVERY_N(2, 1000) << idStr_ << "Failed to write into WAL";
         res = nebula::cpp2::ErrorCode::E_RAFT_WAL_FAIL;
@@ -915,6 +986,17 @@ void RaftPart::appendLogsInternal(AppendLogsIterator iter, TermID termId) {
   return;
 }
 
+/**
+ * @brief Replicate the logs to peers by sending RPC
+ *
+ * @param eb The eventbase to send request
+ * @param iter Log iterator to send
+ * @param currTerm The term when building the iterator
+ * @param lastLogId The last log id in iterator
+ * @param committedId The commit log id
+ * @param prevLogTerm The last log term which has been sent
+ * @param prevLogId The last log id which has been sent
+ */
 void RaftPart::replicateLogs(folly::EventBase* eb,
                              AppendLogsIterator iter,
                              TermID currTerm,
@@ -943,8 +1025,9 @@ void RaftPart::replicateLogs(folly::EventBase* eb,
     return;
   }
 
-  VLOG_IF(1, FLAGS_trace_raft) << idStr_ << "About to replicate logs in range ["
-                               << iter.firstLogId() << ", " << lastLogId << "] to all peer hosts";
+  VLOG_IF(1, FLAGS_trace_raft) << idStr_ << " About to replicate logs in range ["
+                               << iter.firstLogId() << ", " << lastLogId << "] "
+                               << "to all peer hosts";
 
   lastMsgSentDur_.reset();
   auto beforeAppendLogUs = time::WallClock::fastNowInMicroSec();

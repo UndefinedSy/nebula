@@ -78,6 +78,9 @@ void RaftexService::stop() {
   server_->stop();
 }
 
+/**
+ * @brief upsert `part` to `parts_` map indexed by (spaceId, partId)
+ */
 void RaftexService::addPartition(std::shared_ptr<RaftPart> part) {
   // todo(doodle): If we need to start both listener and normal replica on same
   // hosts, this class need to be aware of type.
@@ -85,6 +88,9 @@ void RaftexService::addPartition(std::shared_ptr<RaftPart> part) {
   parts_.emplace(std::make_pair(part->spaceId(), part->partitionId()), part);
 }
 
+/**
+ * @brief stop the raft `part` and remove it from `parts_` map
+ */
 void RaftexService::removePartition(std::shared_ptr<RaftPart> part) {
   using FType = decltype(folly::makeFuture());
   using FTValype = typename FType::value_type;
