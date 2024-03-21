@@ -133,6 +133,7 @@ void Part::asyncAddLearner(const HostAddr& learner, KVCallback cb) {
       });
 }
 
+// 看起来 transfer leader 只是自己让出 leader, 但没看到 target 怎么快速主动发起选举
 void Part::asyncTransferLeader(const HostAddr& target, KVCallback cb) {
   std::string log = encodeHost(OP_TRANS_LEADER, target);
   sendCommandAsync(std::move(log))
@@ -411,8 +412,9 @@ nebula::cpp2::ErrorCode Part::putCommitMsg(WriteBatch* batch,
 }
 
 bool Part::preProcessLog(LogID logId, TermID termId, ClusterID clusterId, folly::StringPiece log) {
-  // We should apply any membership change which happens before start time. Because when we start
-  // up, the peers comes from meta, has already contains all previous changes.
+  // We should apply any membership change which happens before start time.
+  // Because when we start up, the peers comes from meta,
+  // has already contains all previous changes.
   VLOG(4) << idStr_ << "logId " << logId << ", termId " << termId << ", clusterId " << clusterId;
   if (!log.empty()) {
     switch (log[sizeof(int64_t)]) {

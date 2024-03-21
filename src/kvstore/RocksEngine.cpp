@@ -352,10 +352,14 @@ nebula::cpp2::ErrorCode RocksEngine::removeRange(const std::string& start, const
   }
 }
 
+// 表示一个 part 属于该 rocksdb
 std::string RocksEngine::partKey(PartitionID partId) {
   return NebulaKeyUtils::systemPartKey(partId);
 }
 
+// 记录了一个 part 的 peers
+// TODO(syao): so far 看起来只在 peer 状态还没有稳定的时候使用 (i.e. in balancing)
+//             用于恢复之前的 balancing 进度
 std::string RocksEngine::balanceKey(PartitionID partId) {
   return NebulaKeyUtils::systemBalanceKey(partId);
 }
@@ -372,6 +376,12 @@ void RocksEngine::addPart(PartitionID partId, const Peers& raftPeers) {
   }
 }
 
+// Used in
+// - CheckPeersProcessor: change promoted peer to normal peer when finish balancing
+// - Part::preProcessLog:
+//  - when OP_ADD_LEARNER, updatePart(partId, Peer(learner, Status::kLearner));
+//  - when OP_ADD_PEER, updatePart(partId, Peer(learner, Status::kPromotedPeer));
+//  - when OP_REMOVE_PEER, updatePart(partId, Peer(learner, Status::kDeleted));
 nebula::cpp2::ErrorCode RocksEngine::updatePart(PartitionID partId, const Peer& raftPeer) {
   std::string val;
   auto ret = get(balanceKey(partId), &val);
@@ -389,8 +399,8 @@ nebula::cpp2::ErrorCode RocksEngine::updatePart(PartitionID partId, const Peer& 
   peers.addOrUpdate(raftPeer);
 
   if (peers.allNormalPeers()) {
-    // When all replica become normal peers, delete this temp key. (when learner is promoted to
-    // normal replica)
+    // When all replica become normal peers, delete this temp key.
+    // (when learner is promoted to normal replica)
     ret = remove(balanceKey(partId));
   } else {
     ret = put(balanceKey(partId), peers.toString());
@@ -629,6 +639,8 @@ nebula::cpp2::ErrorCode RocksEngine::createCheckpoint(const std::string& checkpo
   return nebula::cpp2::ErrorCode::SUCCEEDED;
 }
 
+// scan data and generate SST files locally
+// 可以考虑用这个来做 snapshot 的传送, 用源端的写 IO 换目标端的写 IO
 ErrorOr<nebula::cpp2::ErrorCode, std::string> RocksEngine::backupTable(
     const std::string& name,
     const std::string& tablePrefix,

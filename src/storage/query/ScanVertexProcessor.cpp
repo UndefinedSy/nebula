@@ -122,7 +122,8 @@ StoragePlan<Cursor> ScanVertexProcessor::buildPlan(
   return plan;
 }
 
-folly::Future<std::pair<nebula::cpp2::ErrorCode, PartitionID>> ScanVertexProcessor::runInExecutor(
+folly::Future<std::pair<nebula::cpp2::ErrorCode, PartitionID>>
+ScanVertexProcessor::runInExecutor(
     RuntimeContext* context,
     nebula::DataSet* result,
     std::unordered_map<PartitionID, cpp2::ScanCursor>* cursorsOfPart,

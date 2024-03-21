@@ -168,6 +168,10 @@ struct Peers {
     return peers;
   }
 
+  // 看当前的 peers 是否包含以下的情况
+  // - kLearner: ADD_LEARNER (before snapshot)
+  // - kPromotedPeer: MEMBER_CHANGE_ADD (after snapshot)
+  // - kMax: ?
   bool allNormalPeers() const {
     for (const auto& [addr, peer] : peers) {
       if (peer.status == Peer::Status::kDeleted) {

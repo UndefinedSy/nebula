@@ -77,12 +77,16 @@ bool NebulaStore::init() {
   return true;
 }
 
+// 从 local storage 中加载 spaces 及 space 下的 parts 的信息
+// 创建 KVEngine 和 Part 对象并存到成员变量中
 void NebulaStore::loadPartFromDataPath() {
   CHECK(!!options_.partMan_);
   LOG(INFO) << "Scan the local path, and init the spaces_";
 
   std::vector<folly::Future<std::pair<GraphSpaceID, std::unique_ptr<KVEngine>>>> futures;
   std::vector<std::string> enginesPath;
+  // 遍历 <dataPath>/nebula/ 下的目录, 如果一个目录存在, 且 spaceId 有效,
+  // 创建 KVEngine 对象
   for (auto& path : options_.dataPaths_) {
     auto rootPath = folly::stringPrintf("%s/nebula", path.c_str());
     auto dirs = fs::FileUtils::listAllDirsInDir(rootPath.c_str());
@@ -133,6 +137,11 @@ void NebulaStore::loadPartFromDataPath() {
       std::map<PartitionID, Peers> partRaftPeers;
 
       // load balancing part info which persisted to local engine.
+      // partpeers 看起来是 partId -> all peers' host 的映射打平,
+      //  记录了之前未完成的 balance 操作
+      // so, 这里看起来是读取本地记录的处于 balancing 的 part peer,
+      //  将本地记录的 peers 与 meta client 中 peers 做 merge 并存到 partRaftPeers. 
+      //  另外会记录处理过的 <Space, Part> 到 partSet
       for (auto& [partId, raftPeers] : engine->balancePartPeers()) {
         CHECK_NE(raftPeers.size(), 0);
 
@@ -142,6 +151,7 @@ void NebulaStore::loadPartFromDataPath() {
           continue;
         }
 
+        // 对于每个 part, 将盘上记录的 peers 与 meta client 中的 merge 一下更新到 partRaftPeers
         auto spacePart = std::make_pair(spaceId, partId);
         if (partSet.find(spacePart) == partSet.end()) {
           partSet.emplace(std::make_pair(spaceId, partId));
@@ -167,14 +177,17 @@ void NebulaStore::loadPartFromDataPath() {
       }
 
       // load normal part ids which persisted to local engine.
+      // 读取本地记录中属于该 rocksdb 的所有 part
       for (auto& partId : engine->allParts()) {
         // first priority: balancing
+        // 跳过上面处理中认为 in balancing 的 part
         bool inBalancing = partRaftPeers.find(partId) != partRaftPeers.end();
         if (inBalancing) {
           continue;
         }
 
         // second priority: meta
+        // 如果确认该 part 不存在了, 移除该 part
         if (!options_.partMan_->partExist(storeSvcAddr_, spaceId, partId).ok()) {
           LOG(INFO) << "Part " << partId
                     << " is not in balancing and does not exist in meta any more, will remove it!";
@@ -182,11 +195,13 @@ void NebulaStore::loadPartFromDataPath() {
           continue;
         }
 
+        // 记录到处理过的 <Space, Part> 到 partSet 并记录 partRaftPeers
         auto spacePart = std::make_pair(spaceId, partId);
         if (partSet.find(spacePart) == partSet.end()) {
           partSet.emplace(spacePart);
 
           // fill the peers
+          // 从 meta 中获取该 part 的 peers, 并更新到 partRaftPeers
           auto metaStatus = options_.partMan_->partMeta(spaceId, partId);
           CHECK(metaStatus.ok());
           auto partMeta = metaStatus.value();
@@ -200,6 +215,7 @@ void NebulaStore::loadPartFromDataPath() {
       }
 
       // there is no valid part in this engine, remove it
+      // 本地有 space 目录, 但实际上其上没有 valid part, 则删除这个 space
       if (partRaftPeers.empty()) {
         auto spaceDir = engine->getDataRoot();
         engine.reset();  // close engine
@@ -211,7 +227,7 @@ void NebulaStore::loadPartFromDataPath() {
         continue;
       }
 
-      // add to spaces
+      // add to member spaces_
       KVEngine* enginePtr = nullptr;
       {
         folly::RWSpinLock::WriteHolder wh(&lock_);
@@ -227,6 +243,9 @@ void NebulaStore::loadPartFromDataPath() {
       std::atomic<size_t> counter(partRaftPeers.size());
       folly::Baton<true, std::atomic> baton;
       LOG(INFO) << "Need to open " << partRaftPeers.size() << " parts of space " << spaceId;
+      // for each part in this space, create corresponding Part object and store
+      // it to class member in a background thread
+      // blocking until all parts are loaded
       for (auto& it : partRaftPeers) {
         auto& partId = it.first;
         Peers& raftPeers = it.second;
@@ -235,7 +254,8 @@ void NebulaStore::loadPartFromDataPath() {
             [spaceId, partId, &raftPeers, enginePtr, &counter, &baton, this]() mutable {
               // create part
               bool isLearner = false;
-              std::vector<HostAddr> addrs;  // raft peers
+              std::vector<HostAddr> addrs;  // raft peers (except self)
+              // HostAddr -> Peer
               for (auto& [addr, raftPeer] : raftPeers.getPeers()) {
                 if (addr == raftAddr_) {  // self
                   if (raftPeer.status == Peer::Status::kLearner) {
@@ -248,10 +268,11 @@ void NebulaStore::loadPartFromDataPath() {
                   }
                 }
               }
+              // create Part object of this part
               auto part = newPart(spaceId, partId, enginePtr, isLearner, addrs);
               LOG(INFO) << "Load part " << spaceId << ", " << partId << " from disk";
 
-              // add learner peers
+              // add learner peers if any
               if (!isLearner) {
                 for (auto& [addr, raftPeer] : raftPeers.getPeers()) {
                   if (addr == raftAddr_) {
@@ -264,7 +285,7 @@ void NebulaStore::loadPartFromDataPath() {
                 }
               }
 
-              // add part to space
+              // add <partId, Part> to spaces_->SpacePartInfo->parts_
               {
                 folly::RWSpinLock::WriteHolder holder(&lock_);
                 auto iter = spaces_.find(spaceId);
@@ -288,6 +309,9 @@ void NebulaStore::loadPartFromDataPath() {
   }
 }
 
+// 从 partManager 中加载 spaces 及 space 下的 parts 的信息
+// 对于之前没存在本地的 Space 创建 SpacePartInfo 和 KVEngine
+// 对于之前没存在本地的 Part
 void NebulaStore::loadPartFromPartManager() {
   LOG(INFO) << "Init data from partManager for " << storeSvcAddr_;
   auto partsMap = options_.partMan_->parts(storeSvcAddr_);
@@ -392,6 +416,7 @@ ErrorOr<nebula::cpp2::ErrorCode, HostAddr> NebulaStore::partLeader(GraphSpaceID 
   return getStoreAddr(partIt->second->leader());
 }
 
+// 如果 spaceId 不存在, 创建对应的 KVEngine 对象并存到成员变量中
 void NebulaStore::addSpace(GraphSpaceID spaceId) {
   folly::RWSpinLock::WriteHolder wh(&lock_);
   // Iterate over all engines to ensure that each dataPath has an engine
@@ -401,7 +426,8 @@ void NebulaStore::addSpace(GraphSpaceID spaceId) {
       bool engineExist = false;
       auto dataPath = folly::stringPrintf("%s/nebula/%d", path.c_str(), spaceId);
       // Check if given data path contain a kv engine of specified spaceId
-      for (auto iter = spaces_[spaceId]->engines_.begin(); iter != spaces_[spaceId]->engines_.end();
+      for (auto iter = spaces_[spaceId]->engines_.begin();
+           iter != spaces_[spaceId]->engines_.end();
            iter++) {
         auto dPath = (*iter)->getDataRoot();
         if (dataPath.compare(dPath) == 0) {
@@ -434,6 +460,19 @@ int32_t NebulaStore::getSpaceVidLen(GraphSpaceID spaceId) {
   return vIdLen;
 }
 
+/**
+ * @brief 将 part 随机分配到一个持有 part 最少的 KVEngine 上, 并在该 engine 本地持久化  
+ *        part 的信息 (part 与 peers). 构造 Part 对象并存到成员变量中
+ * 
+ * @note metad 只负责到将 part 分到 host (即一个 RedZippyDBStore 进程) 上
+ *       storaged 从 part manager 得知 part 信息后再负责将 part 分配给具体的 kv engine
+ *       storaged 内部的分配策略是 round-robin 给 part 最少的 engine
+ * 
+ * @param spaceId 
+ * @param partId 
+ * @param asLearner 
+ * @param peers 
+ */
 void NebulaStore::addPart(GraphSpaceID spaceId,
                           PartitionID partId,
                           bool asLearner,

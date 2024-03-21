@@ -78,6 +78,15 @@ folly::Future<Status> AdminClient::transLeader(GraphSpaceID spaceId,
       });
 }
 
+/**
+ * @brief 向目标发送 addPart 请求, 具体做了创建 Space 以及对应的 KVEngine (if need)
+ *        将该 Part 分配给一个 KVEngine 并创建 Raft Part
+ * @param spaceId 
+ * @param partId 
+ * @param host 
+ * @param asLearner 
+ * @return folly::Future<Status> 
+ */
 folly::Future<Status> AdminClient::addPart(GraphSpaceID spaceId,
                                            PartitionID partId,
                                            const HostAddr& host,
@@ -164,6 +173,17 @@ folly::Future<Status> AdminClient::waitingForCatchUpData(GraphSpaceID spaceId,
   return f;
 }
 
+/**
+ * @brief 对于 <spaceId, partId> 的所有 peer 执行 memberChange 操作 (一条 raft log)
+ *        包括将 peer 加入 raft group (kPromotedPeer)
+ *        或者将 peer 从 raft group 中移除 (kDeleted)
+ * 
+ * @param spaceId 
+ * @param partId 
+ * @param peer  要 change 的 peer
+ * @param added true 为 add, false 为 remove
+ * @return folly::Future<Status> 
+ */
 folly::Future<Status> AdminClient::memberChange(GraphSpaceID spaceId,
                                                 PartitionID partId,
                                                 const HostAddr& peer,
@@ -194,6 +214,10 @@ folly::Future<Status> AdminClient::memberChange(GraphSpaceID spaceId,
   return f;
 }
 
+/**
+ * @brief 将本地存的 <spaceId, partId> 对应的 peers 更新为新的 peers
+ *        具体来说是移除 src, 添加 dst
+ */
 folly::Future<Status> AdminClient::updateMeta(GraphSpaceID spaceId,
                                               PartitionID partId,
                                               const HostAddr& src,

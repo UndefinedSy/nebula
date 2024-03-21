@@ -92,6 +92,8 @@ void BalanceTask::invoke() {
     }
     // fallthrough
     case BalanceTaskStatus::ADD_PART_ON_DST: {
+      // 通知目标节点创建对应的 Space 以及对应的 KVEngine (if need)
+      // 将该 Part 分配给一个 KVEngine, 创建 RaftPart
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Open the part as learner on dst.";
       SAVE_STATE();
       client_->addPart(spaceId_, partId_, dst_, true).thenValue([this](auto&& resp) {
@@ -106,6 +108,9 @@ void BalanceTask::invoke() {
       break;
     }
     case BalanceTaskStatus::ADD_LEARNER: {
+      // 向该 Part 的 RaftGroup Leader 发送 addLearner 请求
+      // Leader 会生成一条 OP_ADD_LEARNER 的 Raft Log, 该请求会在 log commit 后返回
+      // 此时 peers 中的 part balance key 中状态为 kLearner
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Add learner dst.";
       SAVE_STATE();
       client_->addLearner(spaceId_, partId_, dst_).thenValue([this](auto&& resp) {
@@ -134,6 +139,9 @@ void BalanceTask::invoke() {
       break;
     }
     case BalanceTaskStatus::MEMBER_CHANGE_ADD: {
+      // 向该 Part 的 RaftGroup Leader 发送 memberChange 请求
+      // Leader 会生成一条 OP_ADD_PEER 的 Raft Log, 该请求会在 log commit 后返回
+      // 此时 peers 中的 part balance key 中状态为 kPromotedPeer
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Send member change request to the leader"
                 << ", it will add the new member on dst host";
       SAVE_STATE();
@@ -149,6 +157,9 @@ void BalanceTask::invoke() {
       break;
     }
     case BalanceTaskStatus::MEMBER_CHANGE_REMOVE: {
+      // 向该 Part 的 RaftGroup Leader 发送 memberChange 请求
+      // Leader 会生成一条 OP_REMOVE_PEER 的 Raft Log, 该请求会在 log commit 后返回
+      // 此时 peers 中的 part balance key 中状态为 kDeleted
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Send member change request to the leader"
                 << ", it will remove the old member on src host";
       SAVE_STATE();
@@ -164,6 +175,7 @@ void BalanceTask::invoke() {
       break;
     }
     case BalanceTaskStatus::UPDATE_PART_META: {
+      // 更新 metad 中的 part meta, peers 中移除了 src, 添加了 dst
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Update meta for part.";
       SAVE_STATE();
       client_->updateMeta(spaceId_, partId_, src_, dst_).thenValue([this](auto&& resp) {
@@ -181,6 +193,7 @@ void BalanceTask::invoke() {
       break;
     }
     case BalanceTaskStatus::REMOVE_PART_ON_SRC: {
+      // 通知 src 节点删除该 Part 的数据
       auto srcLivedRet = ActiveHostsMan::isLived(kv_, src_);
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Close part on src host, srcLived.";
       SAVE_STATE();
@@ -202,6 +215,8 @@ void BalanceTask::invoke() {
     }
     // fallthrough
     case BalanceTaskStatus::CHECK: {
+      // 通知所有的 raft member 检查一遍 peers, 移除已不存在的 peer, 添加新的 peer
+      // 将 peers 状态都改为 kNormalPeer
       LOG(INFO) << taskIdStr_ + "," + commandStr_ << " Check the peers...";
       SAVE_STATE();
       client_->checkPeers(spaceId_, partId_).thenValue([this](auto&& resp) {
