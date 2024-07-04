@@ -22,17 +22,21 @@ using Set = folly::F14FastSet<K>;
 /**
  * @brief Context during IndexNode init
  *
- * For better extensibility, IndexNode::next() will return a row with fix format every time. For
- * example, a IndexNode will return a row with format "a,b,a+b" to its parent node. In this way,
- * each IndexNode in the execution plan can be completely decoupled. Each node only needs to know
- * two things: The first is the column of the row returned by its child nodes in the attribute or
- * expression calculation result it needs. The second is that it needs to know what content and the
- * corresponding location of the row it returns.
+ * For better extensibility, IndexNode::next() will return a row with fix format
+ * every time.
+ * For example, a IndexNode will return a row with format "a,b,a+b" to its parent node.
+ * In this way, each IndexNode in the execution plan can be completely decoupled.
+ * Each node only needs to know two things:
+ *   1. The first is the column of the row returned by its child nodes in the
+ *      attribute or expression calculation result it needs.
+ *   2. The second is that it needs to know what content and the corresponding
+ *      location of the row it returns.
  *
- * But these contents are not known when IndexNode is constructed, so it needs an Init() process,
- * and in this process, the content required by the parent node is notified to the child node, and
- * the child node needs to inform the specific location of the parent node content.So we need
- * InitContext to pass these messages.
+ * But these contents are not known when IndexNode is constructed, so it needs
+ * an Init() process, and in this process, the content required by the parent
+ * node is notified to the child node, and the child node needs to inform the
+ * specific location of the parent node content.
+ * So we need InitContext to pass these messages.
  *
  * @see IndexNode, IndexNode::init(), IndexNode::next()
  */
@@ -64,16 +68,19 @@ struct InitContext {
  *
  * The functions of IndexNode is divided into three parts.
  *
- * First part is used to build node. This part contains two stages. First, the user needs to make
- * various derived classes and organize them into a plan tree(by `children_`).After that, the
- * root node of plan tree needs to call the init function and recursively call the init function of
- * all child nodes, `Initcontext` will pass parameters between nodes to determine the data format or
- * other information to be returned between nodes during execution.Note that `init` needs to be
- * executed before `copy`.
+ * First part is used to build node. This part contains two stages.
+ * 1. First, the user needs to make various derived classes and organize them
+ * into a plan tree(by `children_`).
+ * 2. After that, the root node of plan tree needs to call the init function
+ * and recursively call the init function of all child nodes, `Initcontext` will
+ * pass parameters between nodes to determine the data format or other
+ * information to be returned between nodes during execution.
+ * Note that `init` needs to be executed before `copy`.
  *
- * Second part is used to access data. `execute()` initlializes some variables at the beginning of
- * each part.Then, `next()` iterates data. At the end, `end()` and `finish()` are called if
- * necessary.
+ * Second part is used to access data. `execute()` initlializes some variables
+ * at the beginning of each part.
+ * Then, `next()` iterates data.
+ * At the end, `end()` and `finish()` are called if necessary.
  *
  * The third part contains some auxiliary functions for debugging.
  *

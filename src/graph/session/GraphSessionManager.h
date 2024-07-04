@@ -20,14 +20,19 @@ DECLARE_int64(max_allowed_connections);
 namespace nebula {
 namespace graph {
 
-// GraphSessionManager manages the client sessions, e.g. create new, find existing and drop expired.
+// GraphSessionManager manages the client sessions,
+// e.g. create new, find existing and drop expired.
+// 
 // Nebula's session management strategy:
-// When a user requests the graph server to create a session, the graph server forwards the request
-// to the meta server, which allocates the session and returns it to the graph server.
-// The meta server manages all the sessions from all graph servers. One graph server only manages
-// its own sessions, including periodically reclaiming expired sessions, and updating sessions
-// information to the meta server in time. When the graph server restarts, it will pull all the
-// sessions from the meta server and choose its own sessions for management.
+// When a user requests the graph server to create a session,
+// the graph server forwards the request to the meta server,
+// which allocates the session and returns it to the graph server.
+// The meta server manages all the sessions from all graph servers.
+// One graph server only manages its own sessions, including periodically
+// reclaiming expired sessions, and updating sessions information to the meta
+// server in time.
+// When the graph server restarts, it will pull all the sessions from the
+// meta server and choose its own sessions for management.
 class GraphSessionManager final : public SessionManager<ClientSession> {
  public:
   // Periodically reclaims expired sessions and updates information to the meta server.

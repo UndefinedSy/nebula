@@ -1814,8 +1814,10 @@ void RaftPart::processAppendLogRequest(const cpp2::AppendLogRequest& req,
       TermID lastTerm = (numLogs == 0) ? req.get_last_log_term_sent()
                                        : req.get_log_str_list().back().get_log_term();
       auto localWalIt = wal_->iterator(firstId, lastId);
+      bool hasConlict = false;
       for (size_t i = 0; i < numLogs && localWalIt->valid(); ++i, ++(*localWalIt), ++diffIndex) {
         if (localWalIt->logTerm() != req.get_log_str_list()[i].get_log_term()) {
+          hasConlict = true;
           break;
         }
       }
@@ -1832,7 +1834,9 @@ void RaftPart::processAppendLogRequest(const cpp2::AppendLogRequest& req,
 
       // Found a difference at log of (firstId + diffIndex), all logs from (firstId + diffIndex)
       // could be truncated
-      wal_->rollbackToLog(firstId + diffIndex - 1);
+      if (hasConlict) {
+        wal_->rollbackToLog(firstId + diffIndex - 1);
+      }
       firstId = firstId + diffIndex;
       numLogs = numLogs - diffIndex;
     }

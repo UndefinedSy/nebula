@@ -585,6 +585,8 @@ bool FileBasedWal::rollbackToLog(LogID id) {
     std::lock_guard<std::mutex> g(walFilesMutex_);
 
     if (!walFiles_.empty()) {
+      // find those wal files whose first logId > `id`,
+      // which means they should be removed entirely
       auto it = walFiles_.upper_bound(id);
       // We need to remove wal files whose entire log range
       // are rolled back
@@ -602,7 +604,7 @@ bool FileBasedWal::rollbackToLog(LogID id) {
       firstLogId_ = 0;
       lastLogId_ = 0;
       lastLogTerm_ = 0;
-    } else {
+    } else {  // the last walFiles_ may contain logs need to be truncated
       VLOG(4) << "Roll back to log " << id << ", the last WAL file is now \""
               << walFiles_.rbegin()->second->path() << "\"";
       rollbackInFile(walFiles_.rbegin()->second, id);
